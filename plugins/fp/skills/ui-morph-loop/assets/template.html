@@ -1,0 +1,196 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<title>UI morph loop</title>
+<style>
+  /* Swap in the product's own font. Geist and Inter both read cleanly at small UI sizes. @import must come first. */
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+  html, body { margin: 0; background: #EDEBE8; overflow: hidden; }
+</style>
+</head><body>
+<script src="seek.js"></script>
+<script>
+/* UI morph loop: a single rounded shape, on screen start to finish. It turns into each interface moment by reshaping
+ * while its content swaps, driven by a cursor, with something happening on every beat.
+ *
+ * Edit the three blocks marked EDIT: the brand, the beat grid, and the STATES list. Everything else is the engine.
+ * Times are in BEATS (b), so retiming to another BPM is one number.
+ */
+const { boot, track, spring, ease, seg, clamp, lerp, mix, hash } = SK;
+
+// ------------------------------------------------------------------ EDIT 1: brand
+const BRAND = {
+  bg: '#EDEBE8',      // canvas: warm light grey reads premium and keeps black UI crisp
+  ink: '#111111',     // the shape
+  paper: '#FFFFFF',   // text on the shape
+  muted: '#8A8782',   // secondary text
+  accent: '#FD9543',  // ONE accent. It moves between states as an element; it never floods the frame.
+  font: 'Inter, system-ui, sans-serif',
+};
+
+// ------------------------------------------------------------------ EDIT 2: beat grid
+const BPM = 120, BEAT = 60 / BPM, BARS = 7;
+const DURATION = BARS * 4 * BEAT;      // 14 s at 120 BPM
+const b = n => n * BEAT;               // beat number -> seconds
+const SIZE = 1440;                     // design space: author everything on a 1440 square. Other aspects reframe it.
+
+// ------------------------------------------------------------------ EDIT 3: the states
+// Each state: at (beat it starts morphing in), w/h/r (the shape), fill, zoom (camera; 1 = shape at natural size),
+// and draw(g, s) for its content. s = { w, h, k (content visibility 0..1), lt (seconds since this state began), t }.
+// Content fades up a moment after its shape begins to reshape and is gone before the next reshape, so labels never collide.
+const STATES = [
+  { id: 'button', at: 0, w: 380, h: 112, r: 56, zoom: 1.9,
+    draw(g, s) { label(g, 'Get started', 0, 0, 36, 600); } },
+  { id: 'loader', at: 2, w: 132, h: 132, r: 66, zoom: 2.3,
+    draw(g, s) { // a spinner that is a pure function of time
+      const a = s.lt * 7; g.lineWidth = 10; g.lineCap = 'round'; g.strokeStyle = BRAND.paper;
+      g.beginPath(); g.arc(0, 0, 34, a, a + 4.2); g.stroke(); } },
+  { id: 'done', at: 4, w: 132, h: 132, r: 66, fill: BRAND.accent, zoom: 2.3,
+    draw(g, s) { // the check draws itself
+      const k = ease.outCubic(seg(s.lt, 0.08, 0.35)); g.lineWidth = 11; g.lineCap = g.lineJoin = 'round'; g.strokeStyle = BRAND.paper;
+      const P = [[-28, 2], [-8, 22], [30, -20]]; const L1 = Math.hypot(20, 20), L2 = Math.hypot(38, 42), d = k * (L1 + L2);
+      g.beginPath(); g.moveTo(...P[0]);
+      if (d < L1) g.lineTo(lerp(P[0][0], P[1][0], d / L1), lerp(P[0][1], P[1][1], d / L1));
+      else { g.lineTo(...P[1]); const f = (d - L1) / L2; g.lineTo(lerp(P[1][0], P[2][0], f), lerp(P[1][1], P[2][1], f)); }
+      g.stroke(); } },
+  { id: 'toggle', at: 6, w: 236, h: 124, r: 62, zoom: 2.1,
+    draw(g, s) { // knob flips on the click at beat 7; its two edges ride different springs so it stretches
+      const t = s.t, on = b(7);
+      const lead = spring(t - on, 3.2, 0.82), trail = spring(t - on - 0.06, 2.4, 0.9);
+      const x0 = -56, x1 = 56, R = 46;
+      const left = lerp(x0 - R, x1 - R, Math.min(lead, trail)), right = lerp(x0 + R, x1 + R, Math.max(lead, trail));
+      g.fillStyle = mix('#3a3a3a', BRAND.accent, clamp(lead)); rr(g, -s.w / 2 + 8, -s.h / 2 + 8, s.w - 16, s.h - 16, s.h / 2 - 8); g.fill();
+      g.fillStyle = BRAND.paper; rr(g, left, -R, right - left, 2 * R, R); g.fill(); } },
+  { id: 'slider', at: 9, w: 760, h: 92, r: 46, zoom: 1.5,
+    stretch: t => { const over = Math.max(0, sliderValue(t) - 1); return [over * 220, -over * 18]; }, // rubber-band past max
+    draw(g, s) { // the pointer carries the value during the drag; beyond the top it rubber-bands, then eases home
+      const v = sliderValue(s.t); const inner = s.w - 40, x = -inner / 2;
+      g.fillStyle = '#3a3a3a'; rr(g, x, -14, inner, 28, 14); g.fill();
+      g.fillStyle = BRAND.paper; rr(g, x, -14, inner * Math.min(v, 1), 28, 14); g.fill(); } },
+  { id: 'tabs', at: 12, w: 820, h: 120, r: 60, zoom: 1.45,
+    draw(g, s) { // the liquid tab indicator: leading edge on a fast spring, trailing edge on a slow one
+      const names = ['Day', 'Week', 'Month'], tw = (s.w - 24) / 3, x0 = -s.w / 2 + 12;
+      const moves = [[b(13), 1], [b(14), 2]];
+      const edge = (f, d) => { let p = 0, prev = 0; for (const [at, to] of moves) { p += (to - prev) * spring(s.t - at, f, d); prev = to; } return p; };
+      const a = edge(3.4, 0.85), c = edge(2.2, 0.95), lo = Math.min(a, c), hi = Math.max(a, c);
+      g.fillStyle = BRAND.paper; rr(g, x0 + lo * tw + 6, -s.h / 2 + 18, (hi - lo) * tw + tw - 12, s.h - 36, (s.h - 36) / 2); g.fill();
+      names.forEach((n, i) => { const sel = clamp(1 - Math.abs(a - i)); label(g, n, x0 + tw * (i + 0.5), 0, 32, 600, mix(BRAND.paper, BRAND.ink, sel)); }); } },
+  { id: 'chart', at: 15, w: 900, h: 560, r: 48, zoom: 1.25,
+    draw(g, s) { // replace DATA with the product's real numbers
+      const DATA = [12, 18, 15, 26, 31, 28, 44, 52, 49, 63];
+      const W = s.w - 120, H = s.h - 200, x0 = -W / 2, y0 = H / 2 + 30, max = Math.max(...DATA);
+      label(g, 'Revenue', x0, -s.h / 2 + 64, 30, 600, BRAND.paper, 'left');
+      const draw = ease.inOutCubic(seg(s.lt, 0.15, 1.1));
+      g.strokeStyle = BRAND.paper; g.lineWidth = 7; g.lineJoin = g.lineCap = 'round'; g.beginPath();
+      const pt = i => [x0 + i / (DATA.length - 1) * W, y0 - DATA[i] / max * H];
+      const n = draw * (DATA.length - 1);
+      for (let i = 0; i <= Math.floor(n); i++) g[i ? 'lineTo' : 'moveTo'](...pt(i));
+      if (n % 1 && n < DATA.length - 1) { const [ax, ay] = pt(Math.floor(n)), [bx, by] = pt(Math.ceil(n)); g.lineTo(lerp(ax, bx, n % 1), lerp(ay, by, n % 1)); }
+      g.stroke();
+      const hov = seg(s.t, b(17), 0.25); // hover tooltip at beat 17
+      if (hov > 0) { const [px, py] = pt(7); g.globalAlpha *= hov;
+        g.fillStyle = BRAND.accent; g.beginPath(); g.arc(px, py, 14, 0, 7); g.fill();
+        g.fillStyle = BRAND.paper; rr(g, px - 90, py - 110, 180, 70, 18); g.fill(); label(g, '$52k', px, py - 75, 30, 700, BRAND.ink); } } },
+  { id: 'command', at: 19, w: 900, h: 140, r: 36, zoom: 1.4,
+    draw(g, s) { // type to filter: characters appear on their own beats, never by timer
+      const text = 'export report', start = b(19.75), per = 0.06;
+      const nch = clamp(Math.floor((s.t - start) / per), 0, text.length);
+      label(g, '⌘K', -s.w / 2 + 70, 0, 30, 600, BRAND.muted);
+      label(g, text.slice(0, nch) || 'Search...', -s.w / 2 + 140, 0, 38, 500, nch ? BRAND.paper : BRAND.muted, 'left');
+      if (Math.floor(s.t * 2.5) % 2 === 0 || nch < text.length) { const m = g.measureText(text.slice(0, nch)).width; g.fillStyle = BRAND.accent; g.fillRect(-s.w / 2 + 146 + (nch ? m : 0), -24, 4, 48); } } },
+  { id: 'toast', at: 22, w: 640, h: 120, r: 60, zoom: 1.6,
+    draw(g, s) { g.fillStyle = BRAND.accent; g.beginPath(); g.arc(-s.w / 2 + 62, 0, 22, 0, 7); g.fill(); label(g, 'Report exported', 30, 0, 36, 600); } },
+  // Back to the first state, exactly, so the loop is seamless. Leave >= 2 beats after this for every spring to settle.
+  { id: 'button', at: 24, w: 380, h: 112, r: 56, zoom: 1.9,
+    draw(g, s) { label(g, 'Get started', 0, 0, 36, 600); } },
+];
+
+// The cursor: [beat, x, y] waypoints in frame pixels (0..SIZE), plus the beats it clicks on.
+const CURSOR = [[0, 1080, 1140], [1.2, 760, 760], [6.3, 790, 745], [9, 470, 760], [9.6, 470, 760], [11, 1180, 760], [12, 720, 790],
+  [12.7, 760, 760], [13.7, 980, 760], [16.4, 960, 600], [19, 820, 820], [22.5, 1000, 900], [24.5, 1080, 1140]];
+const CLICKS = [2, 7, 9.6, 13, 14, 21.5];
+const DRAG = { from: 9.6, to: 11, release: 11, v0: 0.2, v1: 1.35 }; // slider drag in beats; v1 > 1 stretches past max
+
+// ------------------------------------------------------------------ engine (no edits needed below)
+// The real frame is the viewport (render with --w/--h). The 1440 design square is centred and scaled to fit the
+// short side, so 1:1, 9:16 and 16:9 all come from this one file. U converts design pixels to frame pixels.
+const FW = innerWidth, FH = innerHeight, U = Math.min(FW, FH) / SIZE;
+const cv = SK.canvas(FW, FH), g = cv.getContext('2d');
+const fx = x => FW / 2 + (x - SIZE / 2) * U, fy = y => FH / 2 + (y - SIZE / 2) * U;
+const keysOf = f => STATES.map(st => [b(st.at), f(st)]);
+const GEOM = keysOf(st => [st.w, st.h, st.r]), ZOOM = keysOf(st => [st.zoom || 1]);
+const CUR = CURSOR.map(([bt, x, y]) => [b(bt), [x, y]]);
+
+function sliderValue(t) {
+  const { from, to, release, v0, v1 } = DRAG;
+  if (t < b(from)) return v0;
+  if (t < b(release)) return lerp(v0, v1, ease.inOutSine(seg(t, b(from), b(to) - b(from))));
+  return v1 - (v1 - 1) * spring(t - b(release), 2.6, 0.7);   // spring back from wherever it was released
+}
+function rr(g, x, y, w, h, r) { g.beginPath(); g.roundRect(x, y, w, h, Math.max(0, Math.min(r, w / 2, h / 2))); }
+function label(g, text, x, y, size, weight = 600, color = BRAND.paper, align = 'center') {
+  g.font = `${weight} ${size}px ${BRAND.font}`; g.textAlign = align; g.textBaseline = 'middle'; g.fillStyle = color; g.fillText(text, x, y);
+}
+function stateAt(t) { let i = 0; for (let k = 0; k < STATES.length; k++) if (t >= b(STATES[k].at)) i = k; return i; }
+// press: a quick dip on each click, so the shape answers the cursor
+const press = t => CLICKS.reduce((acc, c) => acc + Math.max(0, Math.sin(Math.PI * clamp((t - b(c)) / 0.18))) * 0.035, 0);
+
+function draw(t) {
+  let [w, h, r] = track(t, GEOM, 2.3, 0.8);
+  const zoom = track(t, ZOOM, 1.2, 1)[0];
+  const i = stateAt(t), st = STATES[i], next = STATES[i + 1];
+  if (st.stretch) { const [dw, dh] = st.stretch(t); w += dw; h += dh; }
+  const prevFill = (STATES[i - 1] && STATES[i - 1].fill) || BRAND.ink;
+  const fill = mix(prevFill, st.fill || BRAND.ink, clamp(spring(t - b(st.at), 2.3, 1)));
+
+  g.setTransform(1, 0, 0, 1, 0, 0); g.fillStyle = BRAND.bg; g.fillRect(0, 0, FW, FH);
+  const s = zoom * (1 - press(t)) * U;
+  g.setTransform(s, 0, 0, s, FW / 2, FH / 2);
+
+  // the one shape, with a soft contact shadow so it sits on the canvas
+  g.save(); g.shadowColor = 'rgba(0,0,0,0.18)'; g.shadowBlur = 40 * U; g.shadowOffsetY = 14 * U;
+  g.fillStyle = fill; rr(g, -w / 2, -h / 2, w, h, r); g.fill(); g.restore();
+
+  // content: in just after its morph starts, out just before the next one, with a short blur both ways.
+  // The first state is already showing at t=0 because the loop arrives into it from the last state.
+  const lt = t - b(st.at);
+  const kin = i === 0 ? 1 : ease.outCubic(seg(lt, 0.06, 0.16));
+  const kout = next ? 1 - ease.inOutSine(seg(t, b(next.at) - 0.07, 0.07)) : 1;
+  const k = Math.min(kin, kout);
+  if (k > 0.01) {
+    g.save(); rr(g, -w / 2, -h / 2, w, h, r); g.clip();
+    g.globalAlpha = k; g.filter = k < 0.99 ? `blur(${(1 - k) * 10}px)` : 'none';
+    st.draw(g, { w, h, k, lt, t }); g.restore();
+  }
+
+  // cursor in frame space, critically damped between waypoints; it shrinks a touch on each click
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  let [cx, cy] = track(t, CUR, 1.4, 1); cx = fx(cx); cy = fy(cy);
+  // while the slider is held, the cursor IS the handle: put it exactly on the fill's end (direct manipulation)
+  const held = clamp((t - b(DRAG.from)) / 0.08) * (1 - clamp((t - b(DRAG.release)) / 0.12));
+  if (held > 0) {
+    const v = sliderValue(t), inner = w - 40;
+    const hx = FW / 2 + s * (-inner / 2 + inner * Math.min(v, 1)), hy = FH / 2 + s * 4;
+    cx = lerp(cx, hx, held); cy = lerp(cy, hy, held);
+  }
+  const cs = 1 - CLICKS.reduce((a, c) => a + Math.max(0, Math.sin(Math.PI * clamp((t - b(c) + 0.04) / 0.16))) * 0.18, 0);
+  drawCursor(cx, cy, 1.25 * cs * U);
+}
+function drawCursor(x, y, s) {
+  g.save(); g.translate(x, y); g.scale(s, s);
+  g.beginPath(); g.moveTo(0, 0); g.lineTo(0, 44); g.lineTo(11, 33); g.lineTo(20, 52); g.lineTo(28, 48); g.lineTo(19, 30); g.lineTo(34, 30); g.closePath();
+  g.fillStyle = '#111'; g.strokeStyle = '#fff'; g.lineWidth = 3; g.lineJoin = 'round'; g.shadowColor = 'rgba(0,0,0,.25)'; g.shadowBlur = 10; g.shadowOffsetY = 4;
+  g.stroke(); g.fill(); g.restore();
+}
+
+// sound: a click on every press, a soft pop on every morph, a chime when work completes. sfx.py mixes these.
+function cues() {
+  const out = [];
+  for (const c of CLICKS) out.push({ t: b(c), type: 'click', g: 0.55 });
+  STATES.forEach((st, i) => { if (i) out.push({ t: b(st.at) + 0.02, type: st.id === 'done' ? 'chime' : 'pop', g: 0.4, p: 0.9 + 0.2 * hash(i) }); });
+  for (let k = 0; k < 13; k++) out.push({ t: b(19.75) + k * 0.06, type: 'tick', g: 0.18, p: 1 + 0.15 * hash(k, 3) }); // typing
+  return out.sort((a, b) => a.t - b.t);
+}
+
+boot({ duration: DURATION, draw, cues, ready: document.fonts.load(`600 36px ${BRAND.font}`) });
+</script>
+</body></html>
