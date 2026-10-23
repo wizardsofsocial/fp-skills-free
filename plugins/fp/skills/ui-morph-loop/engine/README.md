@@ -1,8 +1,8 @@
 # Video engine
 
-The shared toolkit behind every skill in the Video Skills library by Fer Patel ([ferpatel.ai](https://ferpatel.ai)). Each plugin ships its own copy in `engine/`, so a skill finds it at `<skill folder>/../../engine/`.
+The shared toolkit behind every skill in the Video Skills library by Fer Patel ([ferpatel.ai](https://ferpatel.ai)). It's MIT licensed. Every packaged skill carries its own copy as `<skill>/engine/`, so each skill zip is self-contained.
 
-## Setup (once per plugin install)
+## Setup (once)
 
 ```bash
 bash <engine>/setup.sh           # playwright + chromium, ffmpeg check, numpy

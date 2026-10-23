@@ -10,7 +10,7 @@ description: "By Fer Patel (ferpatel.ai). Makes a 10-20 second seamless looping 
 
 One element on screen the whole time. It becomes a button, then a loader, a check, a toggle, a slider, tabs, a chart, a command bar and a toast, and it ends exactly where it began, so the video loops forever. A cursor drives every change and something happens on every beat. The craft is that there are no cuts and no fades between scenes: the viewer's eye never has to find a new thing, so a 14-second clip reads as one continuous, satisfying gesture.
 
-**The engine.** `<engine>` below means this plugin's copy of the video engine at `<this skill's folder>/../../engine`. Run `bash <engine>/setup.sh` once. `<engine>/README.md` lists every script.
+**The engine.** `<engine>` below means this skill's own copy of the video engine, at `<this skill's folder>/engine`. Run `bash <engine>/setup.sh` once. `<engine>/README.md` lists every script.
 
 ## What you need
 
