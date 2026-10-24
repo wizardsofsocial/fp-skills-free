@@ -143,13 +143,57 @@
   /** Headless Chromium can't seek a <video> reliably frame by frame, so clips go in as JPEG sequences:
    *    ffmpeg -i clip.mp4 -vf fps=30,scale=1080:-2 -q:v 3 frames/clip_%05d.jpg
    *  const clip = await SK.frames('frames/clip_%05d.jpg', 240, 30);  // count, fps
-   *  clip.at(t) -> the decoded image for time t (holds the last frame past the end); clip.ready is a promise.
-   *  Every frame is decoded up front, so keep clips short or scaled down (300 frames of 1080p is about 2.4 GB). */
-  SK.frames = (pattern, count, fps = 30, start = 1) => {
-    const imgs = []; const name = i => pattern.replace(/%0?(\d*)d/, (_, w) => String(i).padStart(+w || 0, '0'));
-    for (let i = 0; i < count; i++) { const im = new Image(); im.src = name(start + i); imgs.push(im); }
-    const ready = Promise.all(imgs.map(im => im.decode().catch(() => { throw new Error('missing frame ' + im.src); })));
-    return ready.then(() => ({ imgs, fps, count, duration: count / fps, at: t => imgs[Math.max(0, Math.min(count - 1, Math.floor(t * fps + 1e-6)))] }));
+   *  clip.at(t) -> the decoded image for time t (holds the last frame past the end).
+   *  By default every frame is decoded up front, which is simplest but costs memory (300 frames of 1080p is about
+   *  2.4 GB). For long clips pass a window, and only that many decoded frames are kept:
+   *  const clip = await SK.frames('frames/clip_%05d.jpg', 5400, 30, 1, { window: 48 });
+   *  draw(t) stays exactly the same (call clip.at(any time) as before, with any speed or offset). When a frame isn't
+   *  decoded yet, at() hands back the nearest one it has and notes the miss; window.seek (from SK.boot) then decodes
+   *  the missed frames, plus `ahead` frames after each (default 6), and draws t again, so every rendered frame is the
+   *  right one. Lazy clips keep clip.first (frame 0, decoded) and clip.width / clip.height instead of clip.imgs.
+   *  A missing file shows up when seek reaches it, as a rejected seek ('missing frame ...'). */
+  SK._lazy = [];
+  SK.frames = (pattern, count, fps = 30, start = 1, opts = {}) => {
+    const name = i => pattern.replace(/%0?(\d*)d/, (_, w) => String(i).padStart(+w || 0, '0'));
+    const idx = t => Math.max(0, Math.min(count - 1, Math.floor(t * fps + 1e-6)));
+    if (!opts.window) {
+      const imgs = [];
+      for (let i = 0; i < count; i++) { const im = new Image(); im.src = name(start + i); imgs.push(im); }
+      const ready = Promise.all(imgs.map(im => im.decode().catch(() => { throw new Error('missing frame ' + im.src); })));
+      return ready.then(() => ({ imgs, fps, count, duration: count / fps, at: t => imgs[idx(t)] }));
+    }
+    const keep = Math.max(4, opts.window | 0), ahead = Math.max(0, Math.min(keep >> 1, opts.ahead == null ? 6 : opts.ahead));
+    const cache = new Map(), loading = new Map(), missed = new Set(), pinned = new Set();
+    const trim = () => {                       // least recently used first; never a frame the current seek needs
+      for (const k of cache.keys()) { if (cache.size <= keep) break; if (!pinned.has(k)) cache.delete(k); }
+    };
+    const load = i => {
+      if (cache.has(i)) return Promise.resolve(cache.get(i));
+      if (loading.has(i)) return loading.get(i);
+      const im = new Image(); im.src = name(start + i);
+      const p = im.decode().then(() => { loading.delete(i); cache.set(i, im); trim(); return im; },
+        () => { loading.delete(i); throw new Error('missing frame ' + im.src); });
+      loading.set(i, p); return p;
+    };
+    const clip = { fps, count, duration: count / fps, window: keep, lazy: true,
+      at: t => {
+        const i = idx(t), im = cache.get(i);
+        if (im) { cache.delete(i); cache.set(i, im); return im; }
+        missed.add(i); let best = clip.first, bd = Infinity;
+        for (const [k, v] of cache) if (Math.abs(k - i) < bd) { bd = Math.abs(k - i); best = v; }
+        return best;
+      },
+      load: t => load(idx(t)),
+      decoded: () => cache.size,
+      _settle() {                              // called by seek after a draw: decode what it missed, prefetch ahead
+        if (!missed.size) return null;
+        const need = [...missed]; missed.clear(); need.forEach(i => pinned.add(i));
+        for (const i of need) for (let k = 1; k <= ahead; k++) if (i + k < count && !cache.has(i + k)) load(i + k).catch(() => {});
+        return Promise.all(need.map(load));
+      },
+      _unpin() { pinned.clear(); trim(); },
+    };
+    return load(0).then(im => { clip.first = im; clip.width = im.naturalWidth; clip.height = im.naturalHeight; SK._lazy.push(clip); return clip; });
   };
 
   // ---------------------------------------------------------------- boot
@@ -157,7 +201,17 @@
    *  opts: { duration, draw(t), ready?: Promise, cues?: () => [{t,type,g,p,pan,d}] } */
   SK.boot = ({ duration, draw, ready, cues }) => {
     window.DURATION = duration;
-    window.seek = t => draw(Math.max(0, Math.min(duration, t)));
+    // With lazy SK.frames clips, a draw that asked for frames not decoded yet is drawn again once they are.
+    const settle = (t, tries) => {
+      const wait = SK._lazy.map(c => c._settle()).filter(Boolean);
+      if (!wait.length || tries > 3) { SK._lazy.forEach(c => c._unpin()); return; }
+      return Promise.all(wait).then(() => draw(t)).then(() => settle(t, tries + 1));
+    };
+    window.seek = t => {
+      t = Math.max(0, Math.min(duration, t)); const r = draw(t);
+      if (!SK._lazy.length) return r;
+      return r && r.then ? r.then(() => settle(t, 0)) : settle(t, 0);
+    };
     if (cues) window.cues = cues;
     const q = new URLSearchParams(location.search);
     Promise.resolve(ready).then(() => document.fonts ? document.fonts.ready : null).then(() => {

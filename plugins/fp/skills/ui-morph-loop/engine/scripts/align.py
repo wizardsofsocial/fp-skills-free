@@ -15,6 +15,15 @@
   python3 align.py lrc --lrc song.lrc --out words.json
         Use a hand-timed .lrc file (one timestamp per line); words are spread inside each line.
 
+  python3 align.py transcribe --audio talk.wav --out words.json [--model small] [--lang en] [--prompt "Names, jargon"]
+                              [--max-words 7] [--gap 0.6]
+        No script at all (a recorded talk, an interview, footage): speech recognition writes the words AND their times
+        (faster-whisper, installed by `setup.sh --music`; video files work too). Caption lines break at the end of a
+        sentence, at a pause longer than --gap seconds, or after --max-words words (never leaving one or two words
+        of a sentence alone on the next line). Also writes words.txt, one caption line per line, to read through.
+        This is what was heard, not what was meant: check names and numbers before they go on screen, and pass
+        --prompt with the right spellings. Never use it for lyrics (use `lyrics`).
+
 lyrics.txt: one lyric line per line; blank lines separate sections. Lines in [brackets] are ignored (e.g. [Chorus]).
 """
 import argparse, difflib, json, os, re, shutil, subprocess, sys, tempfile
@@ -41,18 +50,18 @@ def cmd_vo(a):
     print(f"{len(out)} words from {len(rows)} lines -> {a.out}")
 
 
-def transcribe(audio, model):
+def transcribe(audio, model, lang=None, prompt=None, vad=False):
     try:
         from faster_whisper import WhisperModel
         m = WhisperModel(model, compute_type="int8")
-        segs, _ = m.transcribe(audio, word_timestamps=True, vad_filter=False)
+        segs, _ = m.transcribe(audio, word_timestamps=True, vad_filter=vad, language=lang, initial_prompt=prompt or None)
         return [(w.word.strip(), w.start, w.end) for s in segs for w in (s.words or [])]
     except ImportError:
         pass
     try:
         import whisper
         m = whisper.load_model(model)
-        r = m.transcribe(audio, word_timestamps=True)
+        r = m.transcribe(audio, word_timestamps=True, language=lang, initial_prompt=prompt or None)
         return [(w["word"].strip(), w["start"], w["end"]) for s in r["segments"] for w in s.get("words", [])]
     except ImportError:
         sys.exit("needs speech recognition: pip install faster-whisper   (or: pip install openai-whisper)")
@@ -119,11 +128,41 @@ def cmd_lrc(a):
     print(f"{len(out)} words from {len(rows)} lrc lines -> {a.out}")
 
 
+def cmd_transcribe(a):
+    heard = [(w, s, e) for w, s, e in transcribe(a.audio, a.model, a.lang, a.prompt, vad=True) if clean(w) or w.strip()]
+    if not heard:
+        sys.exit("no speech was recognized in " + a.audio)
+    ends = [w[-1:] in ".?!" or (i + 1 < len(heard) and heard[i + 1][1] - e > a.gap) for i, (w, _, e) in enumerate(heard)]
+    def left(i):                       # words from i to the end of its sentence or phrase
+        j = i
+        while j < len(heard) - 1 and not ends[j]: j += 1
+        return j - i + 1
+    out, line, n = [], 1, 0
+    for i, (w, s, e) in enumerate(heard):
+        # a new line after a sentence end or a pause; after max-words too, unless only 1-2 words of the sentence remain
+        if n and (ends[i - 1] or (n >= a.max_words and left(i) > 2)):
+            line += 1; n = 0
+        out.append({"w": w, "t0": round(s, 3), "t1": round(max(e, s + 0.05), 3), "line": line}); n += 1
+    json.dump({"words": out, "source": "transcribed"}, open(a.out, "w"), indent=1)
+    lines = {}
+    for w in out:
+        lines.setdefault(w["line"], []).append(w)
+    txt = os.path.splitext(a.out)[0] + ".txt"
+    with open(txt, "w", encoding="utf8") as f:
+        for ws in lines.values():
+            f.write(f"{ws[0]['t0']:7.2f}  {' '.join(x['w'] for x in ws)}\n")
+    print(f"{len(out)} words in {len(lines)} caption lines, transcribed with whisper '{a.model}' -> {a.out}, {txt}")
+    print("  this is what the recognizer heard: check names and numbers before they go on screen")
+
+
 ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 sub = ap.add_subparsers(dest="cmd", required=True)
 v = sub.add_parser("vo"); v.add_argument("--timing", required=True); v.add_argument("--out", required=True)
 ly = sub.add_parser("lyrics"); ly.add_argument("--audio", required=True); ly.add_argument("--lyrics", required=True)
 ly.add_argument("--out", required=True); ly.add_argument("--model", default="small"); ly.add_argument("--stems", action="store_true")
 lr = sub.add_parser("lrc"); lr.add_argument("--lrc", required=True); lr.add_argument("--out", required=True)
+tr = sub.add_parser("transcribe"); tr.add_argument("--audio", required=True); tr.add_argument("--out", required=True)
+tr.add_argument("--model", default="small"); tr.add_argument("--lang"); tr.add_argument("--prompt")
+tr.add_argument("--max-words", type=int, default=7); tr.add_argument("--gap", type=float, default=0.6)
 args = ap.parse_args()
-{"vo": cmd_vo, "lyrics": cmd_lyrics, "lrc": cmd_lrc}[args.cmd](args)
+{"vo": cmd_vo, "lyrics": cmd_lyrics, "lrc": cmd_lrc, "transcribe": cmd_transcribe}[args.cmd](args)

@@ -1,6 +1,6 @@
 {
   "name": "ferpatel-video-engine",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Frame-by-frame renderer for seek(t) HTML compositions. Part of the Video Skills library by Fer Patel (ferpatel.ai).",
   "type": "module",

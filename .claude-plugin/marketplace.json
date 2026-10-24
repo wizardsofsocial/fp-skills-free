@@ -6,14 +6,14 @@
   },
   "metadata": {
     "description": "Free skills by Fer Patel (ferpatel.ai).",
-    "version": "1.0.1"
+    "version": "1.0.2"
   },
   "plugins": [
     {
       "name": "fp",
       "source": "./plugins/fp",
-      "description": "Free video skills by Fer Patel: /fp:ui-morph-loop and /fp:list. The full library of 28 skills is at ferpatel.ai.",
-      "version": "1.0.1",
+      "description": "Free video skills by Fer Patel: /fp:ui-morph-loop and /fp:list. The full library of 30 skills is at ferpatel.ai.",
+      "version": "1.0.2",
       "author": {
         "name": "Fer Patel",
         "url": "https://ferpatel.ai"

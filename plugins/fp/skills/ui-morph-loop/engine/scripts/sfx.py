@@ -2,7 +2,7 @@
 """Synthesize sound effects from a cue list and mix them (plus music and an optional voice-over) under a video.
 
   python3 sfx.py mix --video v.mp4 --cues cues.json --out out.mp4 [--music track.mp3 --offset 0 --fade 3]
-                     [--vo vo.wav [--sfx-duck 10]] [--mono] [--sfx-lufs -19]
+                     [--vo vo.wav [--sfx-duck 10]] [--mono] [--sfx-lufs -19] [--loop]
   python3 sfx.py audition --out sounds.wav        # every sound once, 0.8s apart, to hear the palette
 
 cues.json comes from cues.mjs: {"dur": 60, "cues": [{"t": 1.2, "type": "pop", "g": 0.5, "p": 1.0, "pan": 0, "d": 0}]}
@@ -14,6 +14,11 @@ the effects stem at --sfx-lufs (default -19, i.e. a few dB under the music), the
 -16 LUFS integrated. With --vo, the voice sits at -16 LUFS, the music ducks under it via a sidechain compressor (measured:
 11-17 dB down under speech, about 3 dB down between lines once the final gain-match is applied), and effects drop to
 -24 LUFS so they never fight the words.
+
+--loop is for a piece that plays on repeat (an ambient loop, a UI loop). A sound that runs past the end wraps round to
+the start, as the picture does, and there is no fade in or out. The whole chain (ducking, limiter) runs over two copies
+of the loop and keeps the second, so the filters are already settled at t=0 and the end flows into the start with no
+click. A cue at a negative t, or past the end, wraps too. Music and voice under a loop are trimmed to one loop.
 """
 import argparse, json, os, re, shutil, subprocess, sys, tempfile
 import numpy as np
@@ -136,17 +141,28 @@ def make(c):
     return fn(c.get("p", 1), c["d"]) if c["type"] in LONG and c.get("d") else fn(c.get("p", 1))
 
 
-def stem(cues, dur, mono):
-    L = np.zeros(int((dur + 2) * SR)); R = np.zeros_like(L)
+def stem(cues, dur, mono, loop=False):
+    """The effects stem. With loop, the buffer is exactly one loop long and every sound is laid in modulo its length,
+    so a tail that runs past the end continues from sample 0 (and a long sound can wrap more than once)."""
+    n = int(round(dur * SR)) if loop else int((dur + 2) * SR)
+    L = np.zeros(n); R = np.zeros_like(L)
     for c in cues:
         if c["type"] not in SOUNDS:
             print(f"  skipping unknown sound '{c['type']}' at {c['t']}s (known: {', '.join(SOUNDS)})"); continue
         x = make(c) * c.get("g", 0.5)
         pan = 0 if mono else c.get("pan", 0)
-        a = int(c["t"] * SR); b = min(a + len(x), len(L)); x = x[: b - a]
-        L[a:b] += x * np.cos((pan + 1) * np.pi / 4) * np.sqrt(2)
-        R[a:b] += x * np.sin((pan + 1) * np.pi / 4) * np.sqrt(2)
-    st = np.stack([L, R], 1)[: int(dur * SR)]
+        gl, gr = np.cos((pan + 1) * np.pi / 4) * np.sqrt(2), np.sin((pan + 1) * np.pi / 4) * np.sqrt(2)
+        a = int(round(c["t"] * SR)) if loop else int(c["t"] * SR)
+        if loop:
+            idx = (a + np.arange(len(x))) % n
+            np.add.at(L, idx, x * gl); np.add.at(R, idx, x * gr)
+            continue
+        if a < 0:                                   # started before the video: keep only the part inside it
+            x = x[-a:]; a = 0
+        b = min(a + len(x), len(L)); x = x[: max(0, b - a)]
+        L[a:b] += x * gl
+        R[a:b] += x * gr
+    st = np.stack([L, R], 1)[: int(round(dur * SR)) if loop else int(dur * SR)]
     return st / max(1.0, np.max(np.abs(st)) / 0.95)
 
 
@@ -183,12 +199,15 @@ def mix(a):
     work = tempfile.mkdtemp(prefix="sfx-"); base = os.path.join(work, "x")
     sfx_target = a.sfx_lufs if a.sfx_lufs is not None else (-24 if a.vo else -19)
     inputs = ["-i", a.video]; chains = []; mixins = []; n = 1  # ffmpeg input count (the video is input 0)
+    N = int(round(dur * SR))
+    # with --loop every input is cut to exactly one loop and played twice; the second pass is kept (see the docstring)
+    twice = f",aresample={SR},apad,atrim=end_sample={N},aloop=loop=1:size={N}" if a.loop else ""
     if a.music:
         inputs += ["-ss", str(a.offset), "-i", a.music]; i = n; n += 1
-        chains.append(f"[{i}:a]atrim=0:{dur},asetpts=PTS-STARTPTS,loudnorm=I=-16:TP=-1.5:LRA=11,aresample={SR}"
+        chains.append(f"[{i}:a]atrim=0:{dur},asetpts=PTS-STARTPTS" + twice + f",loudnorm=I=-16:TP=-1.5:LRA=11,aresample={SR}"
                       + (",volume=-6dB" if a.vo else "") + "[m0]")
     if cues:
-        st = stem(cues, dur, a.mono)
+        st = stem(cues, dur, a.mono, a.loop)
         write_wav(base + "_sfx.wav", st)
         g = sfx_target - lufs(base + "_sfx.wav")       # level set from the undipped stem, so --sfx-lufs means the gaps
         if a.vo and a.sfx_duck > 0:
@@ -196,10 +215,10 @@ def mix(a):
             write_wav(base + "_sfx.wav", st * env[:, None])
             print(f"  effects dip {a.sfx_duck:g} dB under the voice ({secs:.1f}s of speech), full level in the gaps")
         inputs += ["-i", base + "_sfx.wav"]; i = n; n += 1
-        chains.append(f"[{i}:a]volume={g:.2f}dB[s]"); mixins.append("[s]")
+        chains.append(f"[{i}:a]volume={g:.2f}dB" + twice + "[s]"); mixins.append("[s]")
     if a.vo:
         inputs += ["-i", a.vo]; i = n; n += 1
-        chains.append(f"[{i}:a]aresample={SR},loudnorm=I=-16:TP=-1.5:LRA=11,apad,atrim=0:{dur},asplit=2[v][vk]")
+        chains.append(f"[{i}:a]aresample={SR}" + twice + f",loudnorm=I=-16:TP=-1.5:LRA=11,apad,atrim=0:{2 * dur if a.loop else dur},asplit=2[v][vk]")
         mixins.append("[v]")
         if a.music:  # duck the music whenever the voice speaks
             chains.append("[m0][vk]sidechaincompress=threshold=0.02:ratio=8:attack=15:release=350:makeup=1[m]")
@@ -212,22 +231,25 @@ def mix(a):
     if not mixins:
         sys.exit("nothing to mix: give --music, --vo, or a cue list with cues")
     fade_st = max(0, dur - a.fade)
+    fades = "" if a.loop else f",afade=t=in:d=0.03,afade=t=out:st={fade_st}:d={a.fade}"
     graph = ";".join(chains) + ";" + "".join(mixins) + (f"amix=inputs={len(mixins)}:normalize=0:duration=first," if len(mixins) > 1 else "anull,") \
-        + f"alimiter=limit=0.89:level=false,afade=t=in:d=0.03,afade=t=out:st={fade_st}:d={a.fade}[a]"
-    subprocess.run([FF, "-y", "-loglevel", "error", *inputs, "-filter_complex", graph, "-map", "[a]", "-t", str(dur), base + "_mix.wav"], check=True)
+        + f"alimiter=limit=0.89:level=false{fades}[a]"
+    subprocess.run([FF, "-y", "-loglevel", "error", *inputs, "-filter_complex", graph, "-map", "[a]", "-t", str(2 * dur if a.loop else dur),
+                    base + "_mix.wav"], check=True)
     trim = -16 - lufs(base + "_mix.wav")
+    second = f",atrim=start_sample={N}:end_sample={2 * N},asetpts=PTS-STARTPTS" if a.loop else ""
     subprocess.run([FF, "-y", "-loglevel", "error", "-i", a.video, "-i", base + "_mix.wav", "-filter_complex",
-                    f"[1:a]volume={trim:.2f}dB,alimiter=limit=0.89:level=false[a]", "-map", "0:v", "-map", "[a]",
+                    f"[1:a]volume={trim:.2f}dB,alimiter=limit=0.89:level=false{second}[a]", "-map", "0:v", "-map", "[a]",
                     "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-t", str(dur), "-movflags", "+faststart", a.out], check=True)
     parts = [p for p, on in (("music", a.music), (f"{len(cues)} sfx cues @ {sfx_target} LUFS", cues), ("voice-over (music ducked)", a.vo)) if on]
-    print(f"wrote {a.out}: {dur:.1f}s, {' + '.join(parts)}, final {lufs(a.out):.1f} LUFS")
-    check(a.out, base + "_sfx.wav" if cues else None, cues)
+    print(f"wrote {a.out}: {dur:.1f}s{' loop' if a.loop else ''}, {' + '.join(parts)}, final {lufs(a.out):.1f} LUFS")
+    check(a.out, base + "_sfx.wav" if cues else None, cues, a.loop)
     if a.keep_stems and cues:
         shutil.copy(base + "_sfx.wav", os.path.splitext(a.out)[0] + "_sfx.wav")
     shutil.rmtree(work, ignore_errors=True)
 
 
-def check(out, sfx_path, cues):
+def check(out, sfx_path, cues, loop=False):
     """Numbers you can read without listening: does each transient start on its cue, and does it clear the mix?"""
     if not sfx_path:
         return
@@ -237,7 +259,7 @@ def check(out, sfx_path, cues):
     s = load(sfx_path); errs = []
     for c in cues:
         if c["type"] in ("tick", "blip", "pop", "click", "impact", "boom", "chime", "shimmer"):
-            a = int(c["t"] * SR); env = np.abs(s[a:a + int(0.25 * SR)])
+            a = int(c["t"] * SR) % max(1, len(s)) if loop else int(c["t"] * SR); env = np.abs(s[a:a + int(0.25 * SR)])
             if len(env) and env.max() > 0:
                 errs.append(np.argmax(env > 0.2 * env.max()) / SR * 1000)
     if errs:
@@ -263,6 +285,7 @@ m.add_argument("--vo"); m.add_argument("--mono", action="store_true", help="no s
 m.add_argument("--keep-stems", action="store_true", help="also save the effects stem next to --out")
 m.add_argument("--sfx-lufs", type=float, default=None, help="effects stem loudness (default -19, or -24 under a voice-over)")
 m.add_argument("--sfx-duck", type=float, default=0, help="with --vo: dip the effects this many dB only while the voice speaks (e.g. 10)")
+m.add_argument("--loop", action="store_true", help="the video plays on repeat: wrap sounds past the end to the start, no fades, no seam")
 au = sub.add_parser("audition"); au.add_argument("--out", required=True)
 args = ap.parse_args()
 mix(args) if args.cmd == "mix" else audition(args)

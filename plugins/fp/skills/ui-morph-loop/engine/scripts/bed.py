@@ -2,6 +2,7 @@
 """A gentle, original music bed for a narrated explainer, synthesized from sine waves (nothing downloaded or licensed).
 
   python3 bed.py --dur 19.4 --out bed.wav [--bpm 84] [--key D] [--minor] [--sections 3.55,8.75,13.25] [--seed 3]
+                [--swell 8.4,17.4:3] [--swell-len 2]
 
 It plays one chord per bar (I V vi IV, or i VI III VII with --minor) as a soft pad, and adds a layer at each time in
 --sections, so the music grows with the explanation instead of looping flat:
@@ -11,6 +12,12 @@ It plays one chord per bar (I V vi IV, or i VI III VII with --minor) as a soft p
   section 3+ + soft offbeat shaker (the payoff)
 Pass the scene start times as --sections so each new layer arrives with a scene. The last chord rings out over the
 final 1.5 s. sfx.py then sets its loudness and ducks it under the voice-over, so the level here does not matter.
+
+--swell makes the music rise INTO a moment (the turn of a brand film, the end card): over the --swell-len seconds
+before each time the whole bed grows by about 5 dB, a sustained voicing of the chord that lands at that time fades in
+an octave up, and soft air noise opens from dark to bright. All of it peaks exactly on the time and falls away over the
+next second, so put the time on the cut or the beat it should land on. "17.4:3" gives that one swell its own length.
+Without --swell the bed is exactly what it was.
 """
 import argparse, wave
 import numpy as np
@@ -49,6 +56,8 @@ def main():
     ap.add_argument('--dur', type=float, required=True); ap.add_argument('--out', required=True)
     ap.add_argument('--bpm', type=float, default=84); ap.add_argument('--key', default='D'); ap.add_argument('--minor', action='store_true')
     ap.add_argument('--sections', default=''); ap.add_argument('--seed', type=int, default=3)
+    ap.add_argument('--swell', default='', help='times to swell into, e.g. 8.4,17.4:3 (time:length)')
+    ap.add_argument('--swell-len', type=float, default=2.0, help='default rise length in seconds (default 2)')
     a = ap.parse_args()
     rng = np.random.default_rng(a.seed)
     beat = 60 / a.bpm; bar = 4 * beat; root = 48 + NOTES[a.key]            # C3-based root
@@ -83,12 +92,38 @@ def main():
                 sh = rng.standard_normal(int(0.06 * SR)); sh = np.diff(sh, prepend=0) * np.exp(-np.arange(len(sh)) / SR * 60)
                 place(mix, sh, tb, pan=0.2, g=0.05)
 
+    swells = []
+    for x in (x.strip() for x in a.swell.split(',')):
+        if x:
+            ts, _, ls = x.partition(':'); swells.append((float(ts), float(ls) if ls else a.swell_len))
+    if swells:
+        srng = np.random.default_rng(a.seed + 101)                     # its own stream: the layers above are unchanged
+        tt = np.arange(n) / SR; gain = np.ones(n)
+        for ts, ln in swells:
+            ln = min(ln, ts)
+            if ln < 0.1 or ts > a.dur: continue
+            k = np.clip((tt - (ts - ln)) / ln, 0, 1); rise = np.where(tt <= ts, k ** 2, 0.0)
+            fall = np.where(tt > ts, np.exp(-(tt - ts) / 0.35), 0.0)
+            gain += 0.8 * (rise + fall)                                 # about +5 dB at the peak
+            b = min(bars - 1, int(ts / bar)); off, q = prog[b % 4]; r = root + off
+            voicing = [r + 24, r + 24 + (3 if q == 'm' else 4), r + 31]
+            i0 = int((ts - ln) * SR); i1 = min(n, int((ts + 1.0) * SR)); m = i1 - i0
+            env_s = (rise + 0.6 * fall)[i0:i1]
+            for j, f in enumerate(voicing):                             # the landing chord, an octave up, fading in
+                place(mix, tone(hz(f), m / SR, harmonics=4, tilt=2.2) * env_s, ts - ln, pan=(-0.5, 0.5, 0)[j], g=0.10)
+            noise = srng.standard_normal(m); air = np.zeros(m); y = 0.0  # air: noise through a low-pass that opens up
+            cut = 0.02 + 0.5 * np.clip(np.arange(m) / max(1, int(ln * SR)), 0, 1) ** 2
+            for s_i in range(m):
+                y += cut[s_i] * (noise[s_i] - y); air[s_i] = y
+            place(mix, air * env_s * 0.5, ts - ln, pan=0.0, g=0.06)
+        mix *= gain[:, None]
     fade = int(1.5 * SR); mix[-fade:] *= np.linspace(1, 0, fade)[:, None] ** 1.5
     mix /= max(1e-9, np.abs(mix).max()) / 0.89
     with wave.open(a.out, 'wb') as w:
         w.setnchannels(2); w.setsampwidth(2); w.setframerate(SR)
         w.writeframes((mix * 32767).astype('<i2').tobytes())
-    print(f"wrote {a.out}: {a.dur:.1f}s, {a.bpm:g} BPM in {a.key} {'minor' if a.minor else 'major'}, layers at {secs}")
+    print(f"wrote {a.out}: {a.dur:.1f}s, {a.bpm:g} BPM in {a.key} {'minor' if a.minor else 'major'}, layers at {secs}"
+          + (f", swells into {[t for t, _ in swells]}" if swells else ""))
 
 
 if __name__ == '__main__':
