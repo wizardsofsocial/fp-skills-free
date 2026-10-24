@@ -25,7 +25,7 @@ The first time a skill runs it sets up its engine (Node 18+, ffmpeg and Python 3
 
 ## The full library
 
-28 skills: explainers, music and lyric videos, social shorts, 3D teardowns, game trailers and product videos. Get them
+30 skills: explainers, music and lyric videos, social shorts, 3D teardowns, game trailers and product videos. Get them
 one at a time or all together at **[ferpatel.ai](https://ferpatel.ai)**.
 
 ## License

@@ -2,6 +2,7 @@
 //
 //   node capture.mjs --url http://127.0.0.1:8765/game.html --out run.mp4 --dur 20
 //        [--w 1080 --h 1920 --fps 30 --subframes 1] [--actions actions.json] [--seed 7] [--webgl] [--cues cues.json]
+//        [--audio run.wav]
 //
 // The page runs on a virtual clock that this script advances exactly 1/fps per frame: performance.now, Date.now,
 // requestAnimationFrame, setTimeout and setInterval are replaced before any page script runs, and Math.random is
@@ -19,17 +20,29 @@
 // with their recording time, for finding highlights. Anything pushed during boot (before recording) is kept at t=0.
 // --cursor draws a visible pointer that follows the scripted mouse (headless Chromium draws none).
 //
-// Sound: the page pushes cues as things happen, window.SFX_LOG.push({type:'pop', g:0.5}) (t is filled in with the
-// virtual time), and --cues writes them out for sfx.py mix. Web Audio output itself is not recorded.
+// Sound, two ways:
+//  --audio run.wav  records the page's own Web Audio, in sync and deterministically. Every AudioContext the page makes
+//                   is really an OfflineAudioContext on the virtual clock: ctx.currentTime is the virtual time, so
+//                   whatever the page schedules (oscillators, buffers, a music scheduler looking ahead of currentTime)
+//                   lands on the same frame as the picture, and after the last frame the graph is rendered offline
+//                   and cut to the recording. resume()/suspend() are no-ops and state reads 'running'. Not covered:
+//                   <audio>/<video> elements and createMediaElementSource / MediaStream nodes (record those as cues).
+//                   The page still has to create its AudioContext: if it waits for a tap, script one in --actions.
+//                   Then: python3 music.py mux run.mp4 run.wav out.mp4 --fade 0 --no-normalize, and master.py.
+//  --cues cues.json the page pushes cues as things happen, window.SFX_LOG.push({type:'pop', g:0.5}) (t is filled in
+//                   with the virtual time), and sfx.py mix synthesizes the engine's own sounds on them.
+// Errors in the page (exceptions and console.error) are printed as they happen and counted at the end.
 import { spawn } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { findFfmpeg, args, loadPlaywright, launchOptions } from './_common.mjs';
 
 const a = args();
-if (!a.url || !a.out || !a.dur) { console.error('usage: node capture.mjs --url <page> --out run.mp4 --dur <s> [--w --h --fps --actions a.json --seed n --webgl --cues c.json --events e.json --cursor]'); process.exit(1); }
+if (!a.url || !a.out || !a.dur) { console.error('usage: node capture.mjs --url <page> --out run.mp4 --dur <s> [--w --h --fps --actions a.json --seed n --webgl --cues c.json --events e.json --audio a.wav --cursor]'); process.exit(1); }
 const W = +(a.w || 1280), H = +(a.h || 720), FPS = +(a.fps || 30), SUB = Math.max(1, +(a.subframes || 1));
 const DUR = +a.dur, SEED = +(a.seed || 7);
 const actions = a.actions ? JSON.parse(readFileSync(a.actions, 'utf8')).sort((x, y) => x.t - y.t) : [];
+const BOOT = 5;                                   // frames the page runs before recording starts
+const AUDIO_SECONDS = BOOT / FPS + DUR + 2;       // length of each offline audio timeline (boot + recording + tail)
 
 const VIRTUAL_CLOCK = `(() => {
   let now = 0; const start = 1700000000000;
@@ -64,6 +77,48 @@ const VIRTUAL_CLOCK = `(() => {
     const cbs = [...raf.values()]; raf.clear();
     for (const cb of cbs) try { cb(now); } catch (e) { console.error(e); }
   };
+  if (${a.audio ? 'true' : 'false'} && window.OfflineAudioContext) {
+    // Web Audio on the virtual clock: each AudioContext is an OfflineAudioContext whose currentTime is the virtual
+    // time, rendered after the last frame (see --audio in capture.mjs).
+    const Off = window.OfflineAudioContext; window.__audioCtxs = [];
+    class RecordedAudioContext extends Off {
+      constructor(o = {}) {
+        const sr = (o && o.sampleRate) || 48000;
+        super({ numberOfChannels: 2, length: Math.ceil(${AUDIO_SECONDS} * sr), sampleRate: sr });
+        this.__closed = false; window.__audioCtxs.push(this);
+      }
+      get currentTime() { return now / 1000; }
+      get state() { return this.__closed ? 'closed' : 'running'; }
+      get baseLatency() { return 0; }
+      get outputLatency() { return 0; }
+      getOutputTimestamp() { return { contextTime: now / 1000, performanceTime: now }; }
+      resume() { return Promise.resolve(); }
+      suspend() { return Promise.resolve(); }
+      close() { this.__closed = true; return Promise.resolve(); }
+      createMediaElementSource() { throw new Error('capture.mjs --audio: media elements are not recorded; log them as cues'); }
+      createMediaStreamSource() { throw new Error('capture.mjs --audio: media streams are not recorded'); }
+      createMediaStreamDestination() { throw new Error('capture.mjs --audio: media streams are not recorded'); }
+    }
+    window.AudioContext = window.webkitAudioContext = RecordedAudioContext;
+    // render every context, keep [from, from + dur) seconds, mix to stereo 16-bit at 48 kHz, return base64 PCM
+    window.__renderAudio = async (from, dur) => {
+      const SR = 48000, n = Math.round(dur * SR), L = new Float32Array(n), R = new Float32Array(n);
+      for (const ctx of window.__audioCtxs) {
+        const buf = await Off.prototype.startRendering.call(ctx), k = buf.sampleRate / SR;
+        const l = buf.getChannelData(0), r = buf.numberOfChannels > 1 ? buf.getChannelData(1) : l;
+        for (let i = 0; i < n; i++) {                      // linear resample when the page chose another rate
+          const x = (from * SR + i) * k, j = Math.floor(x), f = x - j;
+          if (j + 1 >= l.length) break;
+          L[i] += l[j] + (l[j + 1] - l[j]) * f; R[i] += r[j] + (r[j + 1] - r[j]) * f;
+        }
+      }
+      const pcm = new Int16Array(n * 2);
+      for (let i = 0; i < n; i++) { pcm[2 * i] = Math.max(-1, Math.min(1, L[i])) * 32767; pcm[2 * i + 1] = Math.max(-1, Math.min(1, R[i])) * 32767; }
+      const bytes = new Uint8Array(pcm.buffer); let bin = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+      return { contexts: window.__audioCtxs.length, b64: btoa(bin) };
+    };
+  }
 })();`;
 
 const { chromium } = await loadPlaywright();
@@ -71,11 +126,13 @@ const b = await chromium.launch(launchOptions(a));
 const ctx = await b.newContext({ viewport: { width: W, height: H } });
 await ctx.addInitScript(VIRTUAL_CLOCK);
 const p = await ctx.newPage();
-p.on('pageerror', e => console.error('PAGE ERROR', e.message));
+let pageErrors = 0;
+p.on('pageerror', e => { pageErrors++; console.error('PAGE ERROR', e.message); });
+p.on('console', m => { if (m.type() === 'error' && !/favicon|404/.test(m.text())) { pageErrors++; console.error('CONSOLE', m.text()); } });
 await p.goto(a.url, { waitUntil: 'load' });
 await p.evaluate(() => document.fonts && document.fonts.ready);
 // let the page boot on the virtual clock (a few frames of setup, not recorded)
-for (let i = 0; i < 5; i++) await p.evaluate(ms => window.__advance(ms), 1000 / FPS);
+for (let i = 0; i < BOOT; i++) await p.evaluate(ms => window.__advance(ms), 1000 / FPS);
 await p.evaluate(() => {
   window.__rec0 = performance.now();
   for (const log of [window.SFX_LOG, window.EVENTS]) for (const c of log) c.t = 0;   // boot-time marks land at t=0
@@ -131,6 +188,22 @@ if (a.events) {
   writeFileSync(a.events, JSON.stringify({ dur: DUR, events: ev }, null, 1));
   console.error(`${ev.length} events -> ${a.events}`);
 }
+if (a.audio) {
+  const rec0 = await p.evaluate(() => window.__rec0 / 1000);
+  const r = await p.evaluate(([f, d]) => window.__renderAudio ? window.__renderAudio(f, d) : null, [rec0, DUR]);
+  if (!r) console.error('--audio: this browser has no OfflineAudioContext; nothing recorded');
+  else {
+    const pcm = Buffer.from(r.b64, 'base64'), hdr = Buffer.alloc(44);
+    hdr.write('RIFF', 0); hdr.writeUInt32LE(36 + pcm.length, 4); hdr.write('WAVEfmt ', 8); hdr.writeUInt32LE(16, 16);
+    hdr.writeUInt16LE(1, 20); hdr.writeUInt16LE(2, 22); hdr.writeUInt32LE(48000, 24); hdr.writeUInt32LE(48000 * 4, 28);
+    hdr.writeUInt16LE(4, 32); hdr.writeUInt16LE(16, 34); hdr.write('data', 36); hdr.writeUInt32LE(pcm.length, 40);
+    writeFileSync(a.audio, Buffer.concat([hdr, pcm]));
+    let peak = 0; for (let i = 0; i < pcm.length; i += 2) peak = Math.max(peak, Math.abs(pcm.readInt16LE(i)));
+    console.error(`Web Audio -> ${a.audio}  ${DUR}s from ${r.contexts} AudioContext${r.contexts === 1 ? '' : 's'}, peak ${(peak / 32767).toFixed(2)}` +
+      (r.contexts === 0 ? '  (the page made none: does it wait for a tap? add a click to --actions)' : peak === 0 ? '  (silent)' : ''));
+  }
+}
 await b.close();
+if (pageErrors) console.error(`${pageErrors} page error${pageErrors === 1 ? '' : 's'} during the capture (listed above)`);
 if (code !== 0) { console.error('ffmpeg exited with', code); process.exit(code); }
 console.error(`done ${a.out}  ${N} frames, ${DUR}s @ ${W}x${H} ${FPS}fps (virtual clock, seed ${SEED})`);

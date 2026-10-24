@@ -5,6 +5,8 @@
   python3 tts.py voices [--engine edge]
 
 Same vo.json as voiceover.py (ElevenLabs): {"lines": [{"t": 0.4, "until": 5.8, "text": "..."}, ...]}.
+vo.json may also carry "voice" and "rate" ({"voice": "en-US-EmmaNeural", "rate": "+6%", "lines": [...]}), so the
+script remembers how it was read; --voice and --rate on the command line win when given.
 Writes vo.wav, vo_timing.json (per line: start, spoken length, slot) and vo_words.json (per word: w, t0, t1, line),
 which captions read to light up word by word.
 
@@ -76,11 +78,14 @@ def have_edge():
 
 def render(a):
     spec = json.load(open(a.script)); lines = spec["lines"]
+    voice = a.voice or spec.get("voice"); rate = a.rate or spec.get("rate") or "+0%"
     for i, l in enumerate(lines):
         l.setdefault("until", lines[i + 1]["t"] if i + 1 < len(lines) else None)
     engine = a.engine or ("edge" if have_edge() else ("say" if shutil.which("say") else None))
     if not engine:
         sys.exit("no TTS engine: pip install edge-tts (or run on macOS for `say`, or use voiceover.py with ElevenLabs)")
+    if engine == "say" and not a.voice and voice and "Neural" in voice:
+        voice = None                        # an edge voice name saved in vo.json means nothing to `say`
     tmp = tempfile.mkdtemp(prefix="tts_")
     trim = "silenceremove=start_periods=1:start_threshold=-45dB"
     rows, words, parts = [], [], []
@@ -90,14 +95,14 @@ def render(a):
         if engine == "edge":
             for attempt in range(4):        # the edge service sometimes answers "No audio received"; a retry works
                 try:
-                    ws = asyncio.run(edge_line(l["text"], a.voice or "en-US-AndrewNeural", a.rate, raw)); break
+                    ws = asyncio.run(edge_line(l["text"], voice or "en-US-AndrewNeural", rate, raw)); break
                 except Exception as e:
                     if attempt == 3: raise
                     print(f"  edge-tts: {e}; retrying line {i + 1}"); import time; time.sleep(1.5 * (attempt + 1))
             lead = ws[0][0] if ws else 0.0          # the silence we trim off the front
             subprocess.run([FF, "-y", "-loglevel", "error", "-i", raw, "-af", f"atrim=start={lead}", "-ar", str(SR), "-ac", "2", wav], check=True)
         else:
-            cmd = ["say", "-o", raw + ".aiff"] + (["-v", a.voice] if a.voice else []) + [l["text"]]
+            cmd = ["say", "-o", raw + ".aiff"] + (["-v", voice] if voice else []) + [l["text"]]
             subprocess.run(cmd, check=True)
             subprocess.run([FF, "-y", "-loglevel", "error", "-i", raw + ".aiff", "-af", trim, "-ar", str(SR), "-ac", "2", wav], check=True)
         n = duration(wav)
@@ -120,7 +125,7 @@ def render(a):
     for r in rows:
         flag = "  <- OVER: shorten the line or move 'until'" if r in over else ""
         print(f"{r['line']:>2} {r['t']:6.2f}s spoken {r['spoken']:5.2f}s slot {'' if r['slot'] is None else round(r['slot'], 2)}  {r['text'][:60]}{flag}")
-    print(f"wrote {a.out} ({dur:.1f}s, engine {engine}), {base}_timing.json, {base}_words.json ({len(words)} words)")
+    print(f"wrote {a.out} ({dur:.1f}s, engine {engine}{', voice ' + voice if voice else ''}{', rate ' + rate if engine == 'edge' else ''}), {base}_timing.json, {base}_words.json ({len(words)} words)")
 
 
 def voices(a):
@@ -135,7 +140,7 @@ def voices(a):
 ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 sub = ap.add_subparsers(dest="cmd", required=True)
 r = sub.add_parser("render"); r.add_argument("--script", required=True); r.add_argument("--out", required=True)
-r.add_argument("--engine", choices=["edge", "say"]); r.add_argument("--voice"); r.add_argument("--rate", default="+0%")
+r.add_argument("--engine", choices=["edge", "say"]); r.add_argument("--voice"); r.add_argument("--rate", help="edge speaking rate, e.g. +6%% (default: vo.json \"rate\", else +0%%)")
 r.add_argument("--dur", type=float)
 v = sub.add_parser("voices"); v.add_argument("--engine", choices=["edge", "say"])
 args = ap.parse_args()
