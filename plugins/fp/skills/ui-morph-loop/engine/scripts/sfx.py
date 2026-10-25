@@ -2,7 +2,7 @@
 """Synthesize sound effects from a cue list and mix them (plus music and an optional voice-over) under a video.
 
   python3 sfx.py mix --video v.mp4 --cues cues.json --out out.mp4 [--music track.mp3 --offset 0 --fade 3]
-                     [--vo vo.wav [--sfx-duck 10]] [--mono] [--sfx-lufs -19] [--loop]
+                     [--vo vo.wav [--sfx-duck 10] [--music-db -6]] [--mono] [--sfx-lufs -19] [--loop]
   python3 sfx.py audition --out sounds.wav        # every sound once, 0.8s apart, to hear the palette
 
 cues.json comes from cues.mjs: {"dur": 60, "cues": [{"t": 1.2, "type": "pop", "g": 0.5, "p": 1.0, "pan": 0, "d": 0}]}
@@ -11,7 +11,8 @@ cues.json comes from cues.mjs: {"dur": 60, "cues": [{"t": 1.2, "type": "pop", "g
 
 Every sound is generated here from noise and sine waves (nothing to download or license). Levels: music at -16 LUFS,
 the effects stem at --sfx-lufs (default -19, i.e. a few dB under the music), the result limited and gain-matched to
--16 LUFS integrated. With --vo, the voice sits at -16 LUFS, the music ducks under it via a sidechain compressor (measured:
+-16 LUFS integrated. With --vo, the voice sits at -16 LUFS, the music --music-db under it (default -6, so -22 LUFS) and
+ducks further while the voice speaks via a sidechain compressor (with the default, measured:
 11-17 dB down under speech, about 3 dB down between lines once the final gain-match is applied), and effects drop to
 -24 LUFS so they never fight the words.
 
@@ -205,7 +206,7 @@ def mix(a):
     if a.music:
         inputs += ["-ss", str(a.offset), "-i", a.music]; i = n; n += 1
         chains.append(f"[{i}:a]atrim=0:{dur},asetpts=PTS-STARTPTS" + twice + f",loudnorm=I=-16:TP=-1.5:LRA=11,aresample={SR}"
-                      + (",volume=-6dB" if a.vo else "") + "[m0]")
+                      + (f",volume={a.music_db:g}dB" if a.vo else "") + "[m0]")
     if cues:
         st = stem(cues, dur, a.mono, a.loop)
         write_wav(base + "_sfx.wav", st)
@@ -281,7 +282,9 @@ sub = ap.add_subparsers(dest="cmd", required=True)
 m = sub.add_parser("mix")
 m.add_argument("--video", required=True); m.add_argument("--cues", required=True); m.add_argument("--out", required=True)
 m.add_argument("--music"); m.add_argument("--offset", type=float, default=0); m.add_argument("--fade", type=float, default=3)
-m.add_argument("--vo"); m.add_argument("--mono", action="store_true", help="no stereo panning (use for 9:16)")
+m.add_argument("--vo"); m.add_argument("--music-db", type=float, default=-6,
+                                         help="with --vo: the music's level in dB against the voice before ducking (default -6; lower is quieter)")
+m.add_argument("--mono", action="store_true", help="no stereo panning (use for 9:16)")
 m.add_argument("--keep-stems", action="store_true", help="also save the effects stem next to --out")
 m.add_argument("--sfx-lufs", type=float, default=None, help="effects stem loudness (default -19, or -24 under a voice-over)")
 m.add_argument("--sfx-duck", type=float, default=0, help="with --vo: dip the effects this many dB only while the voice speaks (e.g. 10)")

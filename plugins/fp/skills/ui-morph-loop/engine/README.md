@@ -7,6 +7,7 @@ The shared toolkit behind every skill in the Video Skills library by Fer Patel (
 ```bash
 bash <engine>/setup.sh           # playwright + chromium, ffmpeg check, numpy
 bash <engine>/setup.sh --music   # + faster-whisper, demucs, edge-tts (lyrics, stems, free voice-over)
+bash <engine>/setup.sh --image   # + rembg, onnxruntime, OpenCV (cutting a still image into layers)
 ```
 
 ## The composition contract
@@ -33,12 +34,16 @@ Why the pure-function rule: any frame renders on its own and in any order, the o
 | `tts.py` | Free voice-over (edge-tts, or macOS `say`) from a timed script, with per-word timestamps. The script's `vo.json` can carry its `voice` and `rate`; `--voice` / `--rate` override them. |
 | `voiceover.py` | ElevenLabs voice-over (reads `ELEVENLABS_API_KEY` from the environment only). |
 | `sfx.py` | Synthesized sound effects from cues, mixed with music and voice, ducking and loudness handled. `--loop` for pieces on repeat: sounds past the end wrap to the start, no fades, no click at the seam. |
+| `layers.py` | One still image into animatable layers: `split` writes a filled background plate (nearest colour for flat artwork, inpainted for photos) and a transparent cut-out per region or subject (rembg, or by colour for a part drawn over another, with a `pivot` for parts that turn), with `layers.json` and a contact sheet; `propose` drafts regions for a flat-background graphic; `grid` overlays coordinates; `compare` checks a rendered rest frame against the original. |
 | `cues.mjs` | Collects a composition's sound cues (`data-sfx`, `window.SFX`, `window.cues()`). Pass `--webgl` for three.js pages. |
 | `music.py` | Track energy map, and mux music under a video (`--fade 0 --no-normalize` for a whole song). |
 | `bed.py` | Original gentle music bed for narrated pieces: one chord per bar, a layer added at each scene start. `--swell 8.4,17.4` rises into those moments (a turn, the end card). |
 | `track.py` | Original groove track with a drop, arranged from a beat sheet (hook, build, drop, break, end). |
 | `cutdown.py` | Short reels cut from a longer composition, on the beat. |
 | `master.py` | Loudness master to -14 or -16 LUFS with an oversampled peak limiter, measured and corrected on the encoded file. |
+| `appdemo/` | App walkthroughs: `record.mjs` (real-time recorder with a visible cursor), `guard.mjs` (refuses risky clicks, typing and navigation), `plan.mjs` (plan validation and write ledger), `ready.mjs` (readiness gate), `compose.mjs` and `timeline.mjs` (scene timing, captions, camera), `frames.py` (blank and flicker checks, contact sheets). |
+| `replicate.py` | Opening shot from Replicate: `price`, `generate` (only with a yes and a quoted cost, one paid prediction per request key) and `review`. Reads `REPLICATE_API_TOKEN` from the environment only. |
+| `stock.py` | Free Pexels stock clip for an opening shot: `search`, then `get` (cuts it and writes SOURCE.md with the credit). Reads `PEXELS_API_KEY` from the environment only. |
 | `checks.py` | Automatic QA on an MP4: single-frame pops, dead time, cut pacing, loop seam, cuts on the beat. A cut is a full-frame change (caught between dark or low-contrast shots too); wipes and partial changes are listed apart and are not counted as cuts. |
 
 ## The QA loop every skill uses
