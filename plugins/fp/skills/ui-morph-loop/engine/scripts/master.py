@@ -58,6 +58,11 @@ def encode(a, af):
     return float(o["input_i"]), float(o["input_tp"])
 
 
+# How close the limited, encoded output must land to the target before the loop stops. 0.5 let a mix with quiet
+# stretches and sharp speech peaks stop at -16.5 when asked for -16; 0.2 costs at most a round or two more.
+LUFS_TOL = 0.2
+
+
 def cmd_master(a):
     d = measure(a.input, a.lufs, a.tp)
     if a.no_limit:
@@ -74,7 +79,7 @@ def cmd_master(a):
             lim = f"aresample=192000,alimiter=limit={10 ** (ceiling_db / 20):.4f}:attack=0.1:release=60:level=false,aresample=48000"
             af = f"volume={gain:.2f}dB,{lim}"
             i, p = encode(a, af)
-            if p <= a.tp + 0.05 and abs(i - a.lufs) <= 0.5:
+            if p <= a.tp + 0.05 and abs(i - a.lufs) <= LUFS_TOL:
                 break
             if p > a.tp:
                 ceiling_db -= (p - a.tp) + 0.2

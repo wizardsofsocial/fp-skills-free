@@ -32,6 +32,16 @@ const vf = SUB > 1 ? ['-vf', `tmix=frames=${SUB},select='eq(mod(n\\,${SUB})\\,${
 const ff = spawn(findFfmpeg(), ['-y', '-loglevel', 'error', '-f', 'image2pipe', '-framerate', String(FPS * SUB), '-c:v', 'mjpeg', '-i', '-',
   ...vf, '-c:v', 'libx264', '-preset', 'slow', '-crf', String(a.crf || 17), '-pix_fmt', 'yuv420p', '-movflags', '+faststart', a.out],
   { stdio: ['pipe', 'ignore', 'inherit'] });
+// Stopped (Ctrl-C, TERM): ffmpeg gets the signal too and would go on finishing the file after this process is gone,
+// so a caller cleaning up after us could see the half-written video appear again. Kill it and wait for it first.
+for (const [sig, code] of [['SIGINT', 130], ['SIGTERM', 143]]) {
+  process.once(sig, () => {
+    if (ff.exitCode !== null || ff.signalCode !== null) process.exit(code);
+    ff.once('close', () => process.exit(code));
+    ff.kill('SIGKILL');
+    setTimeout(() => process.exit(code), 5000).unref();
+  });
+}
 
 const shot = async t => { await p.evaluate(t => window.seek(t), t); return p.screenshot({ type: 'jpeg', quality: 95 }); };
 const N = Math.round((to - from) * FPS); const t0 = Date.now();
